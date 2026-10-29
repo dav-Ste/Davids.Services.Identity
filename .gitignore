@@ -1,0 +1,23 @@
+# .NET 10 centralized artifacts output (<UseArtifactsOutput>true</UseArtifactsOutput>)
+/artifacts/
+**/artifacts/
+
+# Legacy per-project build & test directories
+**/[Bb]in/
+**/[Oo]bj/
+**/TestResults/
+
+# IDE & user-specific state
+.vs/
+.idea/
+*.user
+*.suo
+.DS_Store
+
+# Secrets, private keys & runtime logs (never commit)
+*.pfx
+*.p12
+*.key
+.env
+.env.*
+**/[Ll]ogs/

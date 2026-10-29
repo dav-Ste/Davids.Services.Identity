@@ -1,0 +1,3 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+<ItemGroup><ProjectReference Include="../Davids.Services.Identity.Core/Davids.Services.Identity.Core.csproj" /></ItemGroup><ItemGroup><FrameworkReference Include="Microsoft.AspNetCore.App" /></ItemGroup></Project>

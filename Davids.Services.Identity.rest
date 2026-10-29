@@ -1,0 +1,44 @@
+@url = https://localhost:7504
+@accessToken = paste-rs256-access-token-here
+@refreshToken = paste-refresh-token-here
+
+### OIDC Discovery Document & Public RSA JWKS
+GET {{url}}/.well-known/openid-configuration
+
+###
+GET {{url}}/.well-known/jwks
+
+### Register customer account (publishes transactional signed_up outbox event)
+POST {{url}}/sign-up
+Content-Type: application/json
+
+{
+  "email": "user@example.com",
+  "password": "Correct-horse-123!"
+}
+
+### Exchange OAuth 2.1 Authorization Code + PKCE (S256) for RS256 access/id/refresh tokens
+POST {{url}}/connect/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=authorization_code&client_id=davids-web&code=paste-authorization-code&redirect_uri=http%3A%2F%2Flocalhost%2Fcallback&code_verifier=paste-pkce-code-verifier
+
+### Rotate single-use refresh token
+POST {{url}}/connect/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=refresh_token&client_id=davids-web&refresh_token={{refreshToken}}
+
+### OIDC UserInfo and /me
+GET {{url}}/connect/userinfo
+Authorization: Bearer {{accessToken}}
+
+###
+GET {{url}}/me
+Authorization: Bearer {{accessToken}}
+
+### RFC 7009 Token Revocation (revokes access token jti in SQL + Redis or refresh token grant)
+POST {{url}}/connect/revocation
+Content-Type: application/x-www-form-urlencoded
+
+client_id=davids-web&token={{accessToken}}&token_type_hint=access_token
