@@ -17,8 +17,11 @@ public sealed class IdentityDbContext(DbContextOptions<IdentityDbContext> option
         b.UseOpenIddict();
 
         b.Entity<UserRow>().HasKey(x => x.Id);
-        b.Entity<UserRow>().Property(x => x.Email).HasMaxLength(320);
-        b.Entity<UserRow>().HasIndex(x => x.Email).IsUnique();
+        b.Entity<UserRow>().Property(x => x.Email).HasMaxLength(320).IsRequired(false);
+        b.Entity<UserRow>().Property(x => x.Password).IsRequired(false);
+        b.Entity<UserRow>().Property(x => x.Role).IsRequired(false);
+        b.Entity<UserRow>().Property(x => x.PermissionsJson).IsRequired(false);
+        b.Entity<UserRow>().HasIndex(x => x.Email).IsUnique().HasFilter("[Email] IS NOT NULL");
         b.Entity<UserRow>().Property(x => x.FailedLoginCount).HasDefaultValue(0);
 
         b.Entity<RevokedAccessToken>().HasKey(x => x.TokenId);
@@ -50,6 +53,8 @@ public sealed class IdentityDbContext(DbContextOptions<IdentityDbContext> option
         });
 
         b.Entity<OutboxMessage>().HasKey(x => x.Id);
+        b.Entity<OutboxMessage>().Property(x => x.Type).IsRequired(false);
+        b.Entity<OutboxMessage>().Property(x => x.Payload).IsRequired(false);
         b.Entity<OutboxMessage>().HasIndex(x => x.PublishedAt);
 
         b.Entity<InboxMessage>().HasKey(x => x.Id);

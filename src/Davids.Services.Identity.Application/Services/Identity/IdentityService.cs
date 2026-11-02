@@ -210,16 +210,17 @@ public class IdentityService(
 
     public async Task SignUpAsync(SignUp command)
     {
-        var normalizedEmail = command.Email?.Trim();
+        var normalizedEmail = command.Email;
         if (!IsValidEmailAddress(normalizedEmail))
         {
             logger.LogWarning("Invalid email format.");
             throw new InvalidEmailException(command.Email);
         }
 
+        var passwordRuneCount = command.Password?.EnumerateRunes().Count() ?? 0;
         if (string.IsNullOrWhiteSpace(command.Password) ||
-            command.Password.Length < 12 ||
-            command.Password.Length > 128 ||
+            passwordRuneCount < 12 ||
+            passwordRuneCount > 128 ||
             command.Password.Contains('\0'))
         {
             throw new InvalidPasswordException();

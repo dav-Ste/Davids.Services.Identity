@@ -65,7 +65,10 @@ public static class Extensions
         }
 
         services.AddScoped<IMessageBroker, MessageBroker>();
-        services.AddHostedService<RabbitWorker>();
+        if (configuration.GetValue("Messaging:Enabled", true))
+        {
+            services.AddHostedService<RabbitWorker>();
+        }
 
         var allowInsecureTransport =
             !environment.IsProduction() &&
