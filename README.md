@@ -1,5 +1,8 @@
 # Davids.Services.Identity
 
+[![Pull Request CI — Security Gate](https://github.com/dav-Ste/Davids.Services.Identity/actions/workflows/pull-request-ci.yml/badge.svg?branch=main)](https://github.com/dav-Ste/Davids.Services.Identity/actions/workflows/pull-request-ci.yml)
+[![Pull Request CI — CodeQL SAST](https://github.com/dav-Ste/Davids.Services.Identity/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/dav-Ste/Davids.Services.Identity/actions/workflows/codeql.yml)
+
 `Davids.Services.Identity` is the standalone .NET 10 **Customer OpenID Connect (OIDC) Provider** microservice repository (`Davids.Services.Identity.slnx`). Built on self-hosted `OpenIddict` (`7.7.2`), it manages **customer-only** (`role: "user"`) registration, OAuth 2.1 **Authorization Code + PKCE (`S256`)** authentication, asymmetric **RS256** JWT issuance, public JWKS discovery, single-use rotating refresh tokens with reuse detection, RFC 7009 token revocation (synced to SQL Server and Redis), SQL Server persistence in `identitydb`, and transactional RabbitMQ outbox integration.
 
 Administrator accounts are never stored in `identitydb`; they live exclusively in the sibling `Davids.Services.AdminIdentity` OIDC authority (`adminidentitydb`).

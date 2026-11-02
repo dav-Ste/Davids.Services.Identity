@@ -68,7 +68,7 @@ public sealed class SecurityAuditMetricsTests
         });
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsync("/connect/token", tokenForm)).StatusCode);
 
-        // 3. RFC 7009 /connect/revocation on a real OpenIddict RS256 access token -> rfc7009_revocation
+        // 3. RFC 7009 /connect/revocation on a real OpenIddict RS256 JWT emits source=rfc7009_revocation
         var oidcSettings = factory.Services.GetRequiredService<OidcSettings>();
         var tokens = await IdentityTests.RegisterAndSignInOidcAsync(client, "audit-revoke@davids.test");
 
