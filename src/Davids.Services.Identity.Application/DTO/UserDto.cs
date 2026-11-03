@@ -11,6 +11,8 @@ namespace Davids.Services.Identity.Application.DTO
         public string Role { get; set; } = string.Empty;
         public DateTime CreatedAt { get; set; }
         public IEnumerable<string> Permissions { get; set; } = [];
+        public DateTime? LockoutEndUtc { get; set; }
+        public bool IsLockedOut => LockoutEndUtc.HasValue && LockoutEndUtc.Value > DateTime.UtcNow;
 
         public UserDto()
         {
@@ -23,6 +25,7 @@ namespace Davids.Services.Identity.Application.DTO
             Role = user.Role;
             CreatedAt = user.CreatedAt;
             Permissions = user.Permissions;
+            LockoutEndUtc = user.LockoutEndUtc;
         }
     }
 }

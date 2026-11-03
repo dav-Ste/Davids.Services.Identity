@@ -8,7 +8,7 @@ namespace Davids.Services.Identity.Core.Repositories
     {
         Task<User?> GetAsync(Guid id);
         Task<User?> GetAsync(string email);
-        Task AddAsync(User user);
-        Task UpdateAsync(User user);
+        Task AddAsync(User user, CustomerChangeAuditEntry? changeAudit = null);
+        Task UpdateAsync(User user, CustomerChangeAuditEntry? changeAudit = null);
     }
 }

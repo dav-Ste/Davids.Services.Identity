@@ -71,5 +71,26 @@ namespace Davids.Services.Identity.Core.Entities
             FailedLoginCount = 0;
             LockoutEndUtc = null;
         }
+
+        public void ChangePasswordHash(string newPasswordHash)
+        {
+            if (string.IsNullOrWhiteSpace(newPasswordHash))
+            {
+                throw new InvalidPasswordException();
+            }
+
+            Password = newPasswordHash;
+            ResetFailedLogins();
+        }
+
+        public void ChangeEmail(string newEmail)
+        {
+            if (string.IsNullOrWhiteSpace(newEmail))
+            {
+                throw new InvalidEmailException(newEmail);
+            }
+
+            Email = newEmail.Trim().ToLowerInvariant();
+        }
     }
 }

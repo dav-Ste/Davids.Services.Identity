@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Davids.Services.Identity.Application.Commands;
 using Davids.Services.Identity.Application.DTO;
 using Davids.Services.Identity.Application.Events;
+using Davids.Services.Identity.Application.Exceptions;
 using Davids.Services.Identity.Core.Entities;
 using Davids.Services.Identity.Core.Exceptions;
 using Davids.Services.Identity.Core.Repositories;
@@ -25,8 +27,15 @@ public class IdentityService(
     IMessageBroker messageBroker,
     ILogger<IdentityService> logger,
     IdentityLockoutSettings? lockoutSettings = null,
-    ILoginAuditRepository? loginAuditRepository = null) : IIdentityService
+    ILoginAuditRepository? loginAuditRepository = null,
+    ICustomerChangeAuditRepository? changeAuditRepository = null,
+    ICustomerTokenRevocationService? tokenRevocation = null) : IIdentityService
 {
+    private static readonly JsonSerializerOptions AuditJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
+
     private readonly IdentityLockoutSettings _lockout = lockoutSettings ?? new IdentityLockoutSettings();
 
     private static readonly Regex EmailRegex = new(
@@ -37,6 +46,11 @@ public class IdentityService(
     private static bool IsValidEmailAddress([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] string? candidate)
     {
         if (string.IsNullOrWhiteSpace(candidate) || candidate.Length < 6 || candidate.Length > 254 || candidate.Contains('\0'))
+        {
+            return false;
+        }
+
+        if (!string.Equals(candidate, candidate.Trim(), StringComparison.Ordinal))
         {
             return false;
         }
@@ -179,6 +193,31 @@ public class IdentityService(
         return entries.Select(LoginAuditDto.FromEntity).ToArray();
     }
 
+    public async Task<IReadOnlyList<CustomerChangeAuditDto>> GetMyChangeAuditsAsync(Guid userId, int limit = 50)
+    {
+        if (changeAuditRepository is null)
+        {
+            return [];
+        }
+
+        var entries = await changeAuditRepository.BrowseForUserAsync(userId, limit);
+        return entries.Select(CustomerChangeAuditDto.FromEntity).ToArray();
+    }
+
+    public async Task<IReadOnlyList<CustomerChangeAuditDto>> BrowseChangeAuditsAsync(
+        int limit = 100,
+        Guid? targetUserId = null,
+        string? actorSub = null)
+    {
+        if (changeAuditRepository is null)
+        {
+            return [];
+        }
+
+        var entries = await changeAuditRepository.BrowseRecentAsync(limit, targetUserId, actorSub);
+        return entries.Select(CustomerChangeAuditDto.FromEntity).ToArray();
+    }
+
     private async Task WriteAuditAsync(
         DateTime occurredAtUtc,
         Guid? userId,
@@ -208,7 +247,7 @@ public class IdentityService(
         await loginAuditRepository.AddAsync(entry);
     }
 
-    public async Task SignUpAsync(SignUp command)
+    public async Task SignUpAsync(SignUp command, string? correlationId = null)
     {
         var normalizedEmail = command.Email;
         if (!IsValidEmailAddress(normalizedEmail))
@@ -217,14 +256,7 @@ public class IdentityService(
             throw new InvalidEmailException(command.Email);
         }
 
-        var passwordRuneCount = command.Password?.EnumerateRunes().Count() ?? 0;
-        if (string.IsNullOrWhiteSpace(command.Password) ||
-            passwordRuneCount < 12 ||
-            passwordRuneCount > 128 ||
-            command.Password.Contains('\0'))
-        {
-            throw new InvalidPasswordException();
-        }
+        ValidatePasswordStrength(command.Password);
 
         if ((!string.IsNullOrWhiteSpace(command.Role) && command.Role != Role.User) || command.Permissions?.Any() == true)
         {
@@ -238,11 +270,220 @@ public class IdentityService(
             throw new EmailInUseException(normalizedEmail);
         }
 
-        var passwordHash = passwordService.Hash(command.Password);
-        var user = new User(command.UserId, normalizedEmail, passwordHash, Role.User, DateTime.UtcNow, command.Permissions);
-        await userRepository.AddAsync(user);
+        var now = DateTime.UtcNow;
+        var passwordHash = passwordService.Hash(command.Password!);
+        var user = new User(command.UserId, normalizedEmail, passwordHash, Role.User, now, command.Permissions);
+
+        var changes = new List<CustomerFieldChangeDto>
+        {
+            new("email", null, user.Email),
+            new("role", null, user.Role),
+            new("password", "[REDACTED]", "[REDACTED]")
+        };
+        var audit = new CustomerChangeAuditEntry(
+            Guid.NewGuid(),
+            now,
+            user.Id,
+            user.Email,
+            "customer_signed_up",
+            user.Id.Value.ToString("D"),
+            user.Email,
+            Role.User,
+            "customer",
+            JsonSerializer.Serialize(changes, AuditJsonOptions),
+            correlationId);
+
+        await userRepository.AddAsync(user, audit);
 
         logger.LogInformation("Created customer account for user {UserId}.", user.Id);
         await messageBroker.PublishAsync(new SignedUp(user.Id, user.Email, user.Role));
+    }
+
+    public async Task ChangeMyPasswordAsync(
+        Guid userId,
+        ChangeCustomerPassword command,
+        IdentityActorMetadata actor)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(actor);
+
+        var user = await userRepository.GetAsync(userId) ?? throw new UserNotFoundException(userId);
+        if (string.IsNullOrEmpty(command.CurrentPassword) || !passwordService.IsValid(user.Password, command.CurrentPassword))
+        {
+            throw new InvalidCurrentPasswordException();
+        }
+
+        ValidatePasswordStrength(command.NewPassword);
+        if (string.Equals(command.CurrentPassword, command.NewPassword, StringComparison.Ordinal))
+        {
+            throw new InvalidPasswordException();
+        }
+
+        user.ChangePasswordHash(passwordService.Hash(command.NewPassword));
+        var changes = new List<CustomerFieldChangeDto>
+        {
+            new("password", "[REDACTED]", "[REDACTED]")
+        };
+
+        var audit = new CustomerChangeAuditEntry(
+            Guid.NewGuid(),
+            DateTime.UtcNow,
+            user.Id,
+            user.Email,
+            "password_changed",
+            actor.ActorSub,
+            actor.ActorEmail ?? user.Email,
+            actor.ActorRole,
+            actor.ActorAuthority,
+            JsonSerializer.Serialize(changes, AuditJsonOptions),
+            actor.CorrelationId);
+
+        await userRepository.UpdateAsync(user, audit);
+        if (tokenRevocation is not null)
+        {
+            await tokenRevocation.RevokeAllForSubjectAsync(
+                user.Id,
+                actor.CurrentAccessTokenJti,
+                actor.CurrentAccessTokenExpiresAtUtc);
+        }
+
+        logger.LogInformation("Audit: customer {UserId} rotated their password.", user.Id);
+    }
+
+    public async Task<UserDto> ChangeMyEmailAsync(
+        Guid userId,
+        ChangeCustomerEmail command,
+        IdentityActorMetadata actor)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(actor);
+
+        var user = await userRepository.GetAsync(userId) ?? throw new UserNotFoundException(userId);
+        if (string.IsNullOrEmpty(command.CurrentPassword) || !passwordService.IsValid(user.Password, command.CurrentPassword))
+        {
+            throw new InvalidCurrentPasswordException();
+        }
+
+        return await UpdateUserEmailCoreAsync(user, command.NewEmail, actor, revokeSessions: false);
+    }
+
+    public async Task<UserDto> UpdateCustomerEmailByEmployeeAsync(
+        Guid targetUserId,
+        EmployeeUpdateCustomerEmail command,
+        IdentityActorMetadata actor)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(actor);
+
+        var user = await userRepository.GetAsync(targetUserId) ?? throw new UserNotFoundException(targetUserId);
+        return await UpdateUserEmailCoreAsync(user, command.NewEmail, actor, revokeSessions: true);
+    }
+
+    public async Task<UserDto> UnlockCustomerByEmployeeAsync(
+        Guid targetUserId,
+        IdentityActorMetadata actor)
+    {
+        ArgumentNullException.ThrowIfNull(actor);
+
+        var user = await userRepository.GetAsync(targetUserId) ?? throw new UserNotFoundException(targetUserId);
+        var previousLockout = user.LockoutEndUtc?.ToString("O") ?? "unlocked";
+        user.ResetFailedLogins();
+
+        var changes = new List<CustomerFieldChangeDto>
+        {
+            new("lockoutEndUtc", previousLockout, "unlocked")
+        };
+
+        var audit = new CustomerChangeAuditEntry(
+            Guid.NewGuid(),
+            DateTime.UtcNow,
+            user.Id,
+            user.Email,
+            "account_unlocked",
+            actor.ActorSub,
+            actor.ActorEmail,
+            actor.ActorRole,
+            actor.ActorAuthority,
+            JsonSerializer.Serialize(changes, AuditJsonOptions),
+            actor.CorrelationId);
+
+        await userRepository.UpdateAsync(user, audit);
+        logger.LogInformation(
+            "Audit: employee {ActorSub} ({ActorRole}) unlocked customer account {UserId}.",
+            actor.ActorSub,
+            actor.ActorRole,
+            user.Id);
+        return new UserDto(user);
+    }
+
+    private async Task<UserDto> UpdateUserEmailCoreAsync(
+        User user,
+        string? rawNewEmail,
+        IdentityActorMetadata actor,
+        bool revokeSessions)
+    {
+        if (!IsValidEmailAddress(rawNewEmail))
+        {
+            throw new InvalidEmailException(rawNewEmail);
+        }
+
+        var normalizedNew = rawNewEmail.ToLowerInvariant();
+        var oldEmail = user.Email;
+        if (string.Equals(oldEmail, normalizedNew, StringComparison.Ordinal))
+        {
+            return new UserDto(user);
+        }
+
+        var existing = await userRepository.GetAsync(normalizedNew);
+        if (existing is not null && existing.Id.Value != user.Id.Value)
+        {
+            throw new EmailInUseException(normalizedNew);
+        }
+
+        user.ChangeEmail(normalizedNew);
+        var changes = new List<CustomerFieldChangeDto>
+        {
+            new("email", oldEmail, user.Email)
+        };
+
+        var audit = new CustomerChangeAuditEntry(
+            Guid.NewGuid(),
+            DateTime.UtcNow,
+            user.Id,
+            user.Email,
+            "email_changed",
+            actor.ActorSub,
+            actor.ActorEmail ?? (actor.ActorAuthority == "customer" ? user.Email : null),
+            actor.ActorRole,
+            actor.ActorAuthority,
+            JsonSerializer.Serialize(changes, AuditJsonOptions),
+            actor.CorrelationId);
+
+        await userRepository.UpdateAsync(user, audit);
+        await messageBroker.PublishAsync(new EmailChanged(user.Id, oldEmail, user.Email));
+
+        if (revokeSessions && tokenRevocation is not null)
+        {
+            await tokenRevocation.RevokeAllForSubjectAsync(user.Id);
+        }
+
+        logger.LogInformation(
+            "Audit: customer {UserId} email changed by {ActorAuthority} {ActorSub}.",
+            user.Id,
+            actor.ActorAuthority,
+            actor.ActorSub);
+        return new UserDto(user);
+    }
+
+    private static void ValidatePasswordStrength(string? password)
+    {
+        var passwordRuneCount = password?.EnumerateRunes().Count() ?? 0;
+        if (string.IsNullOrWhiteSpace(password) ||
+            passwordRuneCount < 12 ||
+            passwordRuneCount > 128 ||
+            password.Contains('\0'))
+        {
+            throw new InvalidPasswordException();
+        }
     }
 }

@@ -31,8 +31,14 @@ Requests can be sent directly to the Customer Identity API (`:5004`), or through
 | `GET` / `POST` | `/connect/logout` | Anonymous | OIDC End-Session logout endpoint |
 | `POST` | `/sign-up` | Anonymous | JSON `email`, `password` (`12+` chars); creates a `user` account in `identitydb` (non-`user` roles rejected with `400`) and queues `signed_up` in the SQL outbox; returns `201` |
 | `GET` | `/me` | `CustomerBearer` | Returns authenticated customer claims (`aud: davids-services`, `role == "user"`) |
+| `PUT` | `/me/password` | `CustomerBearer` | Verifies `currentPassword`, rotates password hash, revokes OpenIddict tokens + caller `jti`, and appends a zero-secret `CustomerChangeAuditLogs` entry |
+| `PUT` | `/me/email` | `CustomerBearer` | Verifies `currentPassword` & email uniqueness, updates login email, queues `email_changed` in SQL Outbox for `Customers`, and records `CustomerChangeAuditLogs` |
 | `GET` | `/me/login-audits` | `CustomerBearer` | Returns append-only zero-secret login audit history (`CustomerLoginAuditLogs`) for the authenticated customer |
-| `GET` | `/users/{userId}` | Owner (`sub` match) | Returns customer account metadata for matching customer `sub` GUID only |
+| `GET` | `/me/change-audits` | `CustomerBearer` | Returns append-only zero-secret account change history (`CustomerChangeAuditLogs`) for the authenticated customer |
+| `GET` | `/users/{userId}` | Owner (`sub`) or `AdminBearer` (`admin`/`support`/`auditor`) | Returns customer account metadata and lockout state |
+| `POST` | `/users/{userId}/unlock` | `AdminBearer` (`admin`/`support`) | Clears failed login counter and lockout window (routed via `/customer-accounts/users/{userId}/unlock`) |
+| `PUT` | `/users/{userId}/email` | `AdminBearer` (`admin`/`support`) | Workforce-verified email recovery + `email_changed` outbox sync (routed via `/customer-accounts/users/{userId}/email`) |
+| `GET` | `/change-audits` | `AdminBearer` (`admin`/`support`/`auditor`) | Workforce customer CIAM change-audit query (`?targetUserId=&limit=`) |
 | `GET` | `/health`, `/alive` | Probe | Readiness and liveness endpoints wired via `Davids.ServiceDefaults` |
 
 ## Persistence and events
@@ -62,4 +68,5 @@ docker build -f Davids.Services.Identity/Dockerfile -t davids-identity:local ..
 - [`Davids.APIGateway`](https://github.com/dav-Ste/Davids.APIGateway) — YARP `2.3.0` edge reverse proxy & confidential Admin OIDC BFF
 - [`Davids.Services.AdminIdentity`](https://github.com/dav-Ste/Davids.Services.AdminIdentity) — Administrator OpenIddict `RS256` OIDC Provider (`adminidentitydb`)
 - [`Davids.Services.Customers`](https://github.com/dav-Ste/Davids.Services.Customers) — Customer profiles & order tracking API (`customersdb`)
-- [`Davids.Frontend.Admin`](https://github.com/dav-Ste/Davids.Frontend.Admin) — Passwordless Admin customer search & editing web UI
+- [`Davids.Frontend.Admin`](https://github.com/dav-Ste/Davids.Frontend.Admin) — Passwordless Workforce RBAC customer, IAM & audit web UI
+- [`Davids.Frontend.Web`](https://github.com/dav-Ste/Davids.Frontend.Web) — Customer Self-Service Web Portal (`CustomerBffCookie` PKCE `S256` BFF)

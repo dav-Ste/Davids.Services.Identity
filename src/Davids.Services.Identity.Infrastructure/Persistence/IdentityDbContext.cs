@@ -8,6 +8,7 @@ public sealed class IdentityDbContext(DbContextOptions<IdentityDbContext> option
     public DbSet<RevokedAccessToken> RevokedAccessTokens => Set<RevokedAccessToken>();
     public DbSet<IdentityDataProtectionKeyRow> DataProtectionKeys => Set<IdentityDataProtectionKeyRow>();
     public DbSet<CustomerLoginAuditLogRow> CustomerLoginAuditLogs => Set<CustomerLoginAuditLogRow>();
+    public DbSet<CustomerChangeAuditLogRow> CustomerChangeAuditLogs => Set<CustomerChangeAuditLogRow>();
     public DbSet<OutboxMessage> Outbox => Set<OutboxMessage>();
     public DbSet<InboxMessage> Inbox => Set<InboxMessage>();
 
@@ -50,6 +51,23 @@ public sealed class IdentityDbContext(DbContextOptions<IdentityDbContext> option
             entity.HasIndex(x => x.OccurredAtUtc);
             entity.HasIndex(x => new { x.Email, x.OccurredAtUtc });
             entity.HasIndex(x => new { x.UserId, x.OccurredAtUtc });
+        });
+
+        b.Entity<CustomerChangeAuditLogRow>(entity =>
+        {
+            entity.ToTable("CustomerChangeAuditLogs");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.TargetEmail).IsRequired().HasMaxLength(320);
+            entity.Property(x => x.Action).IsRequired().HasMaxLength(64);
+            entity.Property(x => x.ActorSub).IsRequired().HasMaxLength(64);
+            entity.Property(x => x.ActorEmail).HasMaxLength(320);
+            entity.Property(x => x.ActorRole).IsRequired().HasMaxLength(32);
+            entity.Property(x => x.ActorAuthority).IsRequired().HasMaxLength(32);
+            entity.Property(x => x.ChangedFieldsJson).IsRequired();
+            entity.Property(x => x.CorrelationId).HasMaxLength(128);
+            entity.HasIndex(x => x.OccurredAtUtc);
+            entity.HasIndex(x => new { x.TargetUserId, x.OccurredAtUtc });
+            entity.HasIndex(x => new { x.ActorSub, x.OccurredAtUtc });
         });
 
         b.Entity<OutboxMessage>().HasKey(x => x.Id);
@@ -100,6 +118,21 @@ public sealed class CustomerLoginAuditLogRow
     public string? ClientId { get; set; }
     public string? ClientIpAddress { get; set; }
     public string? UserAgent { get; set; }
+    public string? CorrelationId { get; set; }
+}
+
+public sealed class CustomerChangeAuditLogRow
+{
+    public Guid Id { get; set; }
+    public DateTime OccurredAtUtc { get; set; }
+    public Guid TargetUserId { get; set; }
+    public string TargetEmail { get; set; } = string.Empty;
+    public string Action { get; set; } = string.Empty;
+    public string ActorSub { get; set; } = string.Empty;
+    public string? ActorEmail { get; set; }
+    public string ActorRole { get; set; } = string.Empty;
+    public string ActorAuthority { get; set; } = string.Empty;
+    public string ChangedFieldsJson { get; set; } = "[]";
     public string? CorrelationId { get; set; }
 }
 

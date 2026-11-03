@@ -27,12 +27,18 @@ public sealed class OidcSettings
     public string[] AllowedRedirectUris { get; set; } =
     [
         "https://localhost/callback",
-        "http://localhost/callback"
+        "http://localhost/callback",
+        "https://localhost/signin-customer-oidc",
+        "http://localhost/signin-customer-oidc",
+        "https://localhost:17320/signin-customer-oidc",
+        "http://localhost:17320/signin-customer-oidc"
     ];
     public string[] AllowedPostLogoutRedirectUris { get; set; } =
     [
         "https://localhost/",
-        "http://localhost/"
+        "http://localhost/",
+        "https://localhost:17320/",
+        "http://localhost:17320/"
     ];
 
     public RsaSecurityKey PrivateSigningKey { get; private set; } = null!;

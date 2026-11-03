@@ -7,7 +7,9 @@ using Microsoft.Extensions.Logging;
 
 namespace Davids.Services.Identity.Infrastructure.Persistence;
 
-public sealed class UserRepository(IdentityDbContext db) : IUserRepository
+public sealed class UserRepository(
+    IdentityDbContext db,
+    ILoggerFactory? loggerFactory = null) : IUserRepository
 {
     public async Task<User?> GetAsync(Guid id)
         => Map(await db.Users.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id));
@@ -18,7 +20,7 @@ public sealed class UserRepository(IdentityDbContext db) : IUserRepository
         return Map(await db.Users.AsNoTracking().SingleOrDefaultAsync(x => x.Email == normalized));
     }
 
-    public async Task AddAsync(User u)
+    public async Task AddAsync(User u, CustomerChangeAuditEntry? changeAudit = null)
     {
         db.Users.Add(new UserRow
         {
@@ -31,17 +33,66 @@ public sealed class UserRepository(IdentityDbContext db) : IUserRepository
             FailedLoginCount = u.FailedLoginCount,
             LockoutEndUtc = u.LockoutEndUtc
         });
+        if (changeAudit is not null)
+        {
+            db.CustomerChangeAuditLogs.Add(ToRow(changeAudit));
+        }
+
         await db.SaveChangesAsync();
+        EmitChangeAuditTelemetry(changeAudit);
     }
 
-    public async Task UpdateAsync(User u)
+    public async Task UpdateAsync(User u, CustomerChangeAuditEntry? changeAudit = null)
     {
-        var row = await db.Users.SingleOrDefaultAsync(x => x.Id == u.Id)
+        var row = await db.Users.SingleOrDefaultAsync(x => x.Id == u.Id.Value)
             ?? throw new InvalidOperationException($"User '{u.Id}' was not found.");
+        row.Email = u.Email;
+        row.Password = u.Password;
         row.FailedLoginCount = u.FailedLoginCount;
         row.LockoutEndUtc = u.LockoutEndUtc;
+        if (changeAudit is not null)
+        {
+            db.CustomerChangeAuditLogs.Add(ToRow(changeAudit));
+        }
+
         await db.SaveChangesAsync();
+        EmitChangeAuditTelemetry(changeAudit);
     }
+
+    private void EmitChangeAuditTelemetry(CustomerChangeAuditEntry? entry)
+    {
+        if (entry is null)
+        {
+            return;
+        }
+
+        IdentitySecurityMetrics.RecordChangeAudit(entry.Action, entry.ActorAuthority);
+        loggerFactory?.CreateLogger("Davids.Security.Audit").LogInformation(
+            "Audit: recorded customer-identity change {Action} on {TargetUserId} by {ActorAuthority} {ActorSub} (ActorRole={ActorRole}, SecurityAuditEvent={SecurityAuditEvent}, CorrelationId={CorrelationId}).",
+            entry.Action,
+            entry.TargetUserId,
+            entry.ActorAuthority,
+            entry.ActorSub,
+            entry.ActorRole,
+            "ChangeAudit",
+            entry.CorrelationId ?? "none");
+    }
+
+    private static CustomerChangeAuditLogRow ToRow(CustomerChangeAuditEntry entry)
+        => new()
+        {
+            Id = entry.Id,
+            OccurredAtUtc = entry.OccurredAtUtc,
+            TargetUserId = entry.TargetUserId,
+            TargetEmail = entry.TargetEmail,
+            Action = entry.Action,
+            ActorSub = entry.ActorSub,
+            ActorEmail = entry.ActorEmail,
+            ActorRole = entry.ActorRole,
+            ActorAuthority = entry.ActorAuthority,
+            ChangedFieldsJson = entry.ChangedFieldsJson,
+            CorrelationId = entry.CorrelationId
+        };
 
     private static User? Map(UserRow? u)
         => u is null
@@ -55,6 +106,51 @@ public sealed class UserRepository(IdentityDbContext db) : IUserRepository
                 JsonSerializer.Deserialize<string[]>(u.PermissionsJson),
                 u.FailedLoginCount,
                 u.LockoutEndUtc.HasValue ? DateTime.SpecifyKind(u.LockoutEndUtc.Value, DateTimeKind.Utc) : null);
+}
+
+public sealed class CustomerChangeAuditRepository(IdentityDbContext db) : ICustomerChangeAuditRepository
+{
+    public Task<IReadOnlyList<CustomerChangeAuditEntry>> BrowseForUserAsync(Guid targetUserId, int limit = 50)
+        => BrowseRecentAsync(limit, targetUserId, actorSub: null);
+
+    public async Task<IReadOnlyList<CustomerChangeAuditEntry>> BrowseRecentAsync(
+        int limit = 100,
+        Guid? targetUserId = null,
+        string? actorSub = null)
+    {
+        var clamped = Math.Clamp(limit, 1, 500);
+        IQueryable<CustomerChangeAuditLogRow> query = db.CustomerChangeAuditLogs.AsNoTracking();
+
+        if (targetUserId.HasValue)
+        {
+            query = query.Where(x => x.TargetUserId == targetUserId.Value);
+        }
+
+        if (!string.IsNullOrWhiteSpace(actorSub))
+        {
+            var trimmed = actorSub.Trim();
+            query = query.Where(x => x.ActorSub == trimmed);
+        }
+
+        var rows = await query
+            .OrderByDescending(x => x.OccurredAtUtc)
+            .ThenByDescending(x => x.Id)
+            .Take(clamped)
+            .ToListAsync();
+
+        return rows.Select(row => new CustomerChangeAuditEntry(
+            row.Id,
+            DateTime.SpecifyKind(row.OccurredAtUtc, DateTimeKind.Utc),
+            row.TargetUserId,
+            row.TargetEmail,
+            row.Action,
+            row.ActorSub,
+            row.ActorEmail,
+            row.ActorRole,
+            row.ActorAuthority,
+            row.ChangedFieldsJson,
+            row.CorrelationId)).ToArray();
+    }
 }
 
 public sealed class LoginAuditRepository(

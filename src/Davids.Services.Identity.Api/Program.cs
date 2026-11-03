@@ -103,7 +103,6 @@ if (!(app.Environment.IsDevelopment() && builder.Configuration.GetValue<bool>("H
     app.UseHttpsRedirection();
 }
 
-// Gracefully absorb client-aborted requests inside user code so Visual Studio Just-My-Code never halts on TaskCanceledException.
 app.Use(async (context, next) =>
 {
     try
@@ -146,6 +145,23 @@ app.MapGet("/", () => Results.Text("Davids Identity OIDC Service"))
     .AllowAnonymous();
 app.MapIdentityOidcEndpoints();
 
+static IdentityActorMetadata ResolveIdentityActor(ClaimsPrincipal principal, HttpContext httpContext)
+{
+    var actor = DavidsActorContext.FromPrincipal(principal, httpContext);
+    var jti = principal.FindFirstValue("jti");
+    DateTime? expUtc = long.TryParse(principal.FindFirstValue("exp"), out var expSeconds)
+        ? DateTimeOffset.FromUnixTimeSeconds(expSeconds).UtcDateTime
+        : null;
+    return new IdentityActorMetadata(
+        actor.ActorSub,
+        actor.ActorEmail,
+        actor.ActorRole,
+        actor.ActorAuthority,
+        actor.CorrelationId,
+        jti,
+        expUtc);
+}
+
 app.MapGet("/me", async (ClaimsPrincipal user, IIdentityService service) =>
 {
     if (!Guid.TryParse(user.FindFirstValue("sub"), out var userId))
@@ -158,7 +174,7 @@ app.MapGet("/me", async (ClaimsPrincipal user, IIdentityService service) =>
 })
 .Produces<UserDto>(StatusCodes.Status200OK)
 .Produces(StatusCodes.Status404NotFound)
-.RequireAuthorization();
+.RequireAuthorization("CustomerOnly");
 
 app.MapGet("/me/login-audits", async (int? limit, ClaimsPrincipal user, IIdentityService service) =>
 {
@@ -177,7 +193,26 @@ app.MapGet("/me/login-audits", async (int? limit, ClaimsPrincipal user, IIdentit
 })
 .Produces<IReadOnlyList<LoginAuditDto>>(StatusCodes.Status200OK)
 .Produces(StatusCodes.Status400BadRequest)
-.RequireAuthorization();
+.RequireAuthorization("CustomerOnly");
+
+app.MapGet("/me/change-audits", async (int? limit, ClaimsPrincipal user, IIdentityService service) =>
+{
+    if (limit is < 1 or > 200)
+    {
+        return Results.BadRequest(new { code = "invalid_limit", reason = "Limit must be between 1 and 200." });
+    }
+
+    if (!Guid.TryParse(user.FindFirstValue("sub"), out var userId))
+    {
+        return Results.Unauthorized();
+    }
+
+    var audits = await service.GetMyChangeAuditsAsync(userId, limit ?? 50);
+    return Results.Ok(audits);
+})
+.Produces<IReadOnlyList<CustomerChangeAuditDto>>(StatusCodes.Status200OK)
+.Produces(StatusCodes.Status400BadRequest)
+.RequireAuthorization("CustomerOnly");
 
 app.MapGet("/users/{userId:guid}", async (Guid userId, HttpContext httpContext, ClaimsPrincipal user, IIdentityService service) =>
 {
@@ -186,7 +221,9 @@ app.MapGet("/users/{userId:guid}", async (Guid userId, HttpContext httpContext, 
         return Results.BadRequest(new { code = "unexpected_query_parameters", reason = "User resource endpoint does not accept query parameters." });
     }
 
-    if (!Guid.TryParse(user.FindFirstValue("sub"), out var subjectId) || subjectId != userId)
+    var role = user.FindFirstValue("role");
+    var isWorkforce = DavidsRoles.CanReadWorkforce(role);
+    if (!isWorkforce && (!Guid.TryParse(user.FindFirstValue("sub"), out var subjectId) || subjectId != userId))
     {
         return Results.Forbid();
     }
@@ -197,22 +234,124 @@ app.MapGet("/users/{userId:guid}", async (Guid userId, HttpContext httpContext, 
 .Produces<UserDto>(StatusCodes.Status200OK)
 .Produces(StatusCodes.Status400BadRequest)
 .Produces(StatusCodes.Status404NotFound)
-.RequireAuthorization();
+.RequireAuthorization("CustomerOrWorkforceRead");
+
+app.MapGet("/change-audits", async (
+    int? limit,
+    Guid? targetUserId,
+    string? actorSub,
+    IIdentityService service) =>
+{
+    if (limit is < 1 or > 500)
+    {
+        return Results.BadRequest(new { code = "invalid_limit", reason = "Limit must be between 1 and 500." });
+    }
+
+    var entries = await service.BrowseChangeAuditsAsync(limit ?? 100, targetUserId, actorSub);
+    return Results.Ok(entries);
+})
+.Produces<IReadOnlyList<CustomerChangeAuditDto>>(StatusCodes.Status200OK)
+.Produces(StatusCodes.Status400BadRequest)
+.RequireAuthorization("WorkforceRead");
 
 var commands = app.MapGroup("").RequireRateLimiting("authentication").AddEndpointFilter<TransactionFilter>();
-commands.MapPost("/sign-up", async (SignUp command, IIdentityService service) =>
+commands.MapPost("/sign-up", async (SignUp command, HttpContext httpContext, IIdentityService service) =>
 {
     if (command is null)
     {
         return Results.BadRequest(new { code = "invalid_request", reason = "Request body is required." });
     }
 
-    await service.SignUpAsync(command);
+    await service.SignUpAsync(command, DavidsActorContext.ResolveCorrelationId(httpContext));
     return Results.Created("identity/me", (object?)null);
 })
 .Produces(StatusCodes.Status201Created)
 .Produces(StatusCodes.Status400BadRequest)
 .Produces(StatusCodes.Status409Conflict);
+
+commands.MapPut("/me/password", async (
+    ChangeCustomerPassword command,
+    HttpContext httpContext,
+    ClaimsPrincipal user,
+    IIdentityService service) =>
+{
+    if (command is null)
+    {
+        return Results.BadRequest(new { code = "invalid_request", reason = "Request body is required." });
+    }
+
+    if (!Guid.TryParse(user.FindFirstValue("sub"), out var userId))
+    {
+        return Results.Unauthorized();
+    }
+
+    var actor = ResolveIdentityActor(user, httpContext);
+    await service.ChangeMyPasswordAsync(userId, command, actor);
+    return Results.NoContent();
+})
+.Produces(StatusCodes.Status204NoContent)
+.Produces(StatusCodes.Status400BadRequest)
+.RequireAuthorization("CustomerOnly");
+
+commands.MapPut("/me/email", async (
+    ChangeCustomerEmail command,
+    HttpContext httpContext,
+    ClaimsPrincipal user,
+    IIdentityService service) =>
+{
+    if (command is null)
+    {
+        return Results.BadRequest(new { code = "invalid_request", reason = "Request body is required." });
+    }
+
+    if (!Guid.TryParse(user.FindFirstValue("sub"), out var userId))
+    {
+        return Results.Unauthorized();
+    }
+
+    var actor = ResolveIdentityActor(user, httpContext);
+    var updated = await service.ChangeMyEmailAsync(userId, command, actor);
+    return Results.Ok(updated);
+})
+.Produces<UserDto>(StatusCodes.Status200OK)
+.Produces(StatusCodes.Status400BadRequest)
+.RequireAuthorization("CustomerOnly");
+
+var employeeMutations = app.MapGroup("").AddEndpointFilter<TransactionFilter>();
+employeeMutations.MapPost("/users/{userId:guid}/unlock", async (
+    Guid userId,
+    HttpContext httpContext,
+    ClaimsPrincipal user,
+    IIdentityService service) =>
+{
+    var actor = ResolveIdentityActor(user, httpContext);
+    var unlocked = await service.UnlockCustomerByEmployeeAsync(userId, actor);
+    return Results.Ok(unlocked);
+})
+.Produces<UserDto>(StatusCodes.Status200OK)
+.Produces(StatusCodes.Status404NotFound)
+.RequireAuthorization("WorkforceSupport");
+
+employeeMutations.MapPut("/users/{userId:guid}/email", async (
+    Guid userId,
+    EmployeeUpdateCustomerEmail command,
+    HttpContext httpContext,
+    ClaimsPrincipal user,
+    IIdentityService service) =>
+{
+    if (command is null)
+    {
+        return Results.BadRequest(new { code = "invalid_request", reason = "Request body is required." });
+    }
+
+    var actor = ResolveIdentityActor(user, httpContext);
+    var updated = await service.UpdateCustomerEmailByEmployeeAsync(userId, command, actor);
+    return Results.Ok(updated);
+})
+.Produces<UserDto>(StatusCodes.Status200OK)
+.Produces(StatusCodes.Status400BadRequest)
+.Produces(StatusCodes.Status404NotFound)
+.RequireAuthorization("WorkforceSupport");
 
 app.Run();
 public partial class Program;

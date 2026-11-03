@@ -9,6 +9,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.IdentityModel.Tokens;
 using OpenIddict.Abstractions;
 using StackExchange.Redis;
 using static OpenIddict.Abstractions.OpenIddictConstants;
@@ -17,6 +18,9 @@ namespace Davids.Services.Identity.Infrastructure;
 
 public static class Extensions
 {
+    public const string CustomerScheme = JwtBearerDefaults.AuthenticationScheme;
+    public const string AdminScheme = AdminOidcValidationSettings.SchemeName;
+
     public static IServiceCollection AddIdentityInfrastructure(
         this IServiceCollection services,
         IConfiguration configuration,
@@ -25,6 +29,13 @@ public static class Extensions
         var oidc = configuration.GetSection("Oidc").Get<OidcSettings>() ?? new OidcSettings();
         oidc.InitializeKeys(requireExplicitEncryptionKey: environment.IsProduction());
         services.AddSingleton(oidc);
+
+        var adminOidc = configuration.GetSection("AdminOidc").Get<AdminOidcValidationSettings>()
+            ?? new AdminOidcValidationSettings();
+        adminOidc.Audience = string.IsNullOrWhiteSpace(adminOidc.Audience) ? "davids-admin" : adminOidc.Audience;
+        var adminStaticKey = adminOidc.ValidateAndResolveStaticPublicKey();
+        services.AddSingleton(adminOidc);
+
         var lockout = configuration.GetSection("Lockout").Get<IdentityLockoutSettings>() ?? new IdentityLockoutSettings();
         services.AddSingleton(lockout);
         services.AddDataProtection();
@@ -41,9 +52,11 @@ public static class Extensions
 
         services.AddScoped<IUserRepository, UserRepository>();
         services.AddScoped<ILoginAuditRepository, LoginAuditRepository>();
+        services.AddScoped<ICustomerChangeAuditRepository, CustomerChangeAuditRepository>();
+        services.AddScoped<RevocationStore>();
+        services.AddScoped<ICustomerTokenRevocationService>(sp => sp.GetRequiredService<RevocationStore>());
         services.AddScoped<IIdentityService, IdentityService>();
         services.AddSingleton<IPasswordService, PasswordService>();
-        services.AddScoped<RevocationStore>();
 
         if (configuration.GetValue<bool>("Redis:Enabled"))
         {
@@ -104,7 +117,6 @@ public static class Extensions
                 options.SetRefreshTokenLifetime(TimeSpan.FromDays(oidc.RefreshTokenLifetimeDays));
                 options.SetRefreshTokenReuseLeeway(TimeSpan.Zero);
 
-                // Downstream resource servers (APIGateway, Customers, Istio) verify RS256 signatures via public JWKS.
                 options.DisableAccessTokenEncryption();
 
                 options.AddSigningKey(oidc.PrivateSigningKey);
@@ -133,8 +145,8 @@ public static class Extensions
                 }
             });
 
-        services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-            .AddJwtBearer(o =>
+        var authBuilder = services.AddAuthentication(CustomerScheme)
+            .AddJwtBearer(CustomerScheme, o =>
             {
                 o.MapInboundClaims = false;
                 o.TokenValidationParameters = oidc.CreateValidationParameters();
@@ -145,7 +157,7 @@ public static class Extensions
                         var role = context.Principal?.FindFirst(Claims.Role)?.Value;
                         if (!string.Equals(role, "user", StringComparison.Ordinal))
                         {
-                            context.Fail("Customer Identity accepts customer ('user') tokens only.");
+                            context.Fail("Customer Identity accepts customer ('user') tokens only on CustomerBearer.");
                             return;
                         }
 
@@ -165,8 +177,80 @@ public static class Extensions
                 };
             });
 
+        if (adminOidc.IsConfigured)
+        {
+            var requireHttpsAdminMetadata = adminOidc.RequireHttpsMetadata ?? environment.IsProduction();
+            authBuilder.AddJwtBearer(AdminScheme, options =>
+            {
+                options.MapInboundClaims = false;
+                options.RequireHttpsMetadata = requireHttpsAdminMetadata;
+                if (!string.IsNullOrWhiteSpace(adminOidc.MetadataAddress))
+                {
+                    options.MetadataAddress = adminOidc.MetadataAddress;
+                }
+
+                options.TokenValidationParameters = new TokenValidationParameters
+                {
+                    ValidateIssuer = !string.IsNullOrWhiteSpace(adminOidc.EffectiveIssuer),
+                    ValidIssuer = adminOidc.EffectiveIssuer,
+                    ValidateAudience = true,
+                    ValidAudience = adminOidc.Audience,
+                    ValidateIssuerSigningKey = true,
+                    IssuerSigningKey = adminStaticKey,
+                    ValidateLifetime = true,
+                    RequireExpirationTime = true,
+                    RequireSignedTokens = true,
+                    ValidAlgorithms = [SecurityAlgorithms.RsaSha256],
+                    ClockSkew = TimeSpan.FromSeconds(30),
+                    NameClaimType = Claims.Subject,
+                    RoleClaimType = Claims.Role
+                };
+                options.Events = new JwtBearerEvents
+                {
+                    OnTokenValidated = context =>
+                    {
+                        var role = context.Principal?.FindFirst(Claims.Role)?.Value;
+                        if (role is not ("admin" or "support" or "auditor"))
+                        {
+                            context.Fail("AdminBearer accepts workforce roles (admin, support, auditor) only.");
+                        }
+
+                        return Task.CompletedTask;
+                    }
+                };
+            });
+        }
+
+        string[] dualSchemes = adminOidc.IsConfigured ? [CustomerScheme, AdminScheme] : [CustomerScheme];
+        string[] workforceSchemes = adminOidc.IsConfigured ? [AdminScheme] : [CustomerScheme];
+
+        services.AddAuthorizationBuilder()
+            .AddPolicy("CustomerOnly", policy =>
+            {
+                policy.AddAuthenticationSchemes(CustomerScheme);
+                policy.RequireAuthenticatedUser();
+                policy.RequireClaim(Claims.Role, "user");
+            })
+            .AddPolicy("CustomerOrWorkforceRead", policy =>
+            {
+                policy.AddAuthenticationSchemes(dualSchemes);
+                policy.RequireAuthenticatedUser();
+                policy.RequireClaim(Claims.Role, "user", "admin", "support", "auditor");
+            })
+            .AddPolicy("WorkforceSupport", policy =>
+            {
+                policy.AddAuthenticationSchemes(workforceSchemes);
+                policy.RequireAuthenticatedUser();
+                policy.RequireClaim(Claims.Role, "admin", "support");
+            })
+            .AddPolicy("WorkforceRead", policy =>
+            {
+                policy.AddAuthenticationSchemes(workforceSchemes);
+                policy.RequireAuthenticatedUser();
+                policy.RequireClaim(Claims.Role, "admin", "support", "auditor");
+            });
+
         services.AddHealthChecks().AddCheck<DatabaseHealthCheck>("identity-database");
-        services.AddAuthorization();
         return services;
     }
 }
