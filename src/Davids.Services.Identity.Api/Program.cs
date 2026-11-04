@@ -162,8 +162,13 @@ static IdentityActorMetadata ResolveIdentityActor(ClaimsPrincipal principal, Htt
         expUtc);
 }
 
-app.MapGet("/me", async (ClaimsPrincipal user, IIdentityService service) =>
+app.MapGet("/me", async (HttpContext httpContext, ClaimsPrincipal user, IIdentityService service) =>
 {
+    if (httpContext.Request.QueryString.HasValue)
+    {
+        return Results.BadRequest(new { code = "unexpected_query_parameters", reason = "Self-profile endpoint does not accept query parameters." });
+    }
+
     if (!Guid.TryParse(user.FindFirstValue("sub"), out var userId))
     {
         return Results.Unauthorized();
@@ -173,6 +178,7 @@ app.MapGet("/me", async (ClaimsPrincipal user, IIdentityService service) =>
     return dto is null ? Results.NotFound() : Results.Ok(dto);
 })
 .Produces<UserDto>(StatusCodes.Status200OK)
+.Produces(StatusCodes.Status400BadRequest)
 .Produces(StatusCodes.Status404NotFound)
 .RequireAuthorization("CustomerOnly");
 
@@ -247,6 +253,11 @@ app.MapGet("/change-audits", async (
         return Results.BadRequest(new { code = "invalid_limit", reason = "Limit must be between 1 and 500." });
     }
 
+    if (actorSub is not null && (actorSub.Length > 128 || actorSub.Contains('\0')))
+    {
+        return Results.BadRequest(new { code = "invalid_actor_sub", reason = "Actor subject filter is invalid." });
+    }
+
     var entries = await service.BrowseChangeAuditsAsync(limit ?? 100, targetUserId, actorSub);
     return Results.Ok(entries);
 })
@@ -315,6 +326,7 @@ commands.MapPut("/me/email", async (
 })
 .Produces<UserDto>(StatusCodes.Status200OK)
 .Produces(StatusCodes.Status400BadRequest)
+.Produces(StatusCodes.Status409Conflict)
 .RequireAuthorization("CustomerOnly");
 
 var employeeMutations = app.MapGroup("").AddEndpointFilter<TransactionFilter>();
@@ -324,11 +336,17 @@ employeeMutations.MapPost("/users/{userId:guid}/unlock", async (
     ClaimsPrincipal user,
     IIdentityService service) =>
 {
+    if (httpContext.Request.QueryString.HasValue)
+    {
+        return Results.BadRequest(new { code = "unexpected_query_parameters", reason = "Customer unlock endpoint does not accept query parameters." });
+    }
+
     var actor = ResolveIdentityActor(user, httpContext);
     var unlocked = await service.UnlockCustomerByEmployeeAsync(userId, actor);
     return Results.Ok(unlocked);
 })
 .Produces<UserDto>(StatusCodes.Status200OK)
+.Produces(StatusCodes.Status400BadRequest)
 .Produces(StatusCodes.Status404NotFound)
 .RequireAuthorization("WorkforceSupport");
 
@@ -339,6 +357,11 @@ employeeMutations.MapPut("/users/{userId:guid}/email", async (
     ClaimsPrincipal user,
     IIdentityService service) =>
 {
+    if (httpContext.Request.QueryString.HasValue)
+    {
+        return Results.BadRequest(new { code = "unexpected_query_parameters", reason = "Customer email update endpoint does not accept query parameters." });
+    }
+
     if (command is null)
     {
         return Results.BadRequest(new { code = "invalid_request", reason = "Request body is required." });
@@ -351,6 +374,7 @@ employeeMutations.MapPut("/users/{userId:guid}/email", async (
 .Produces<UserDto>(StatusCodes.Status200OK)
 .Produces(StatusCodes.Status400BadRequest)
 .Produces(StatusCodes.Status404NotFound)
+.Produces(StatusCodes.Status409Conflict)
 .RequireAuthorization("WorkforceSupport");
 
 app.Run();
