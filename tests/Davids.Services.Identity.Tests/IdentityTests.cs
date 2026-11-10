@@ -177,6 +177,26 @@ public sealed class IdentityTests
             root.GetProperty("token_type").GetString()!);
     }
 
+    [Theory]
+    [InlineData("user@example.com<script>alert(1)</script>")]
+    [InlineData("not-an-email")]
+    public async Task InvalidSignUpEmailIsRejectedWithoutReflectingSubmittedValue(string invalidEmail)
+    {
+        using var factory = new IdentityFactory();
+        using var client = factory.CreateIdentityClient();
+
+        using var response = await client.PostAsJsonAsync("/sign-up", new { email = invalidEmail, password = Password });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(invalidEmail, body, StringComparison.Ordinal);
+        using var document = JsonDocument.Parse(body);
+        Assert.Equal("invalid_email", document.RootElement.GetProperty("code").GetString());
+        Assert.Equal("Invalid email address.", document.RootElement.GetProperty("reason").GetString());
+        Assert.DoesNotContain(invalidEmail, document.RootElement.GetProperty("reason").GetString()!, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task DiscoveryAndJwksExposeRs256PublicKeyAndRequirePkceS256()
     {

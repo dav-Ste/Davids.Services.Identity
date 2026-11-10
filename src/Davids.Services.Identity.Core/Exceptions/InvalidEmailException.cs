@@ -4,7 +4,7 @@ namespace Davids.Services.Identity.Core.Exceptions
     {
         public override string Code { get; } = "invalid_email";
         
-        public InvalidEmailException(string? email) : base($"Invalid email: {email}.")
+        public InvalidEmailException(string? email) : base("Invalid email address.")
         {
         }
     }
